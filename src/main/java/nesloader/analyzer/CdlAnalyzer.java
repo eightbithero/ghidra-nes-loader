@@ -11,6 +11,7 @@ import ghidra.app.services.AbstractAnalyzer;
 import ghidra.app.services.AnalysisPriority;
 import ghidra.app.services.AnalyzerType;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.framework.options.OptionType;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
@@ -44,7 +45,7 @@ public class CdlAnalyzer extends AbstractAnalyzer {
 
     private static final String OPTION_CDL_PATH = "CDL File Path";
 
-    private String cdlFilePath = "";
+    private File cdlFile = null;
 
     public CdlAnalyzer() {
         super(NAME, DESCRIPTION, AnalyzerType.BYTE_ANALYZER);
@@ -65,28 +66,26 @@ public class CdlAnalyzer extends AbstractAnalyzer {
 
     @Override
     public void registerOptions(Options options, Program program) {
-        options.registerOption(OPTION_CDL_PATH, "", null,
-            "Absolute path to the CDL file produced by FCEUX or Mesen. " +
-            "File size must match PRG-ROM size.");
+        options.registerOption(OPTION_CDL_PATH, OptionType.FILE_TYPE, null, null,
+            "CDL file produced by FCEUX or Mesen. File size must match PRG-ROM size.");
     }
 
     @Override
     public void optionsChanged(Options options, Program program) {
-        cdlFilePath = options.getString(OPTION_CDL_PATH, "");
+        cdlFile = options.getFile(OPTION_CDL_PATH, null);
     }
 
     @Override
     public boolean added(Program program, AddressSetView set,
                          TaskMonitor monitor, MessageLog log) {
 
-        if (cdlFilePath == null || cdlFilePath.isBlank()) {
-            log.appendMsg(NAME, "CDL file path not set — skipping.");
+        if (cdlFile == null) {
+            log.appendMsg(NAME, "CDL file not set — skipping.");
             return false;
         }
 
-        File cdlFile = new File(cdlFilePath);
         if (!cdlFile.isFile()) {
-            log.appendMsg(NAME, "CDL file not found: " + cdlFilePath);
+            log.appendMsg(NAME, "CDL file not found: " + cdlFile.getAbsolutePath());
             return false;
         }
 
