@@ -8,7 +8,7 @@ import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.listing.Program;
-import ghidra.util.exception.CancelledException;
+import ghidra.program.model.address.AddressOverflowException;
 import ghidra.util.task.TaskMonitor;
 import nesloader.format.INesHeader;
 
@@ -28,7 +28,7 @@ public class NromMapper implements Mapper {
     @Override
     public void mapMemory(Program program, ByteProvider provider, INesHeader header,
                           TaskMonitor monitor, MessageLog log)
-            throws IOException, CancelledException {
+            throws IOException, AddressOverflowException {
 
         AddressSpace space   = program.getAddressFactory().getDefaultAddressSpace();
         int prgOffset        = header.getPrgRomOffset();

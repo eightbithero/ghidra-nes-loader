@@ -1,0 +1,33 @@
+# Gradle build output
+build/
+dist/
+.gradle/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Ghidra user files (created when opening project in Ghidra)
+ghidra/
+*.rep/
+*.gpr
+
+# Compiled class files (in case of manual javac)
+*.class
+
+# Local Gradle properties (may contain paths/credentials)
+local.properties
+gradle-local.properties

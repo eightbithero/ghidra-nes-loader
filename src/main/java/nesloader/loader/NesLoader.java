@@ -11,16 +11,17 @@ import ghidra.app.util.MemoryBlockUtils;
 import ghidra.app.util.bin.BinaryReader;
 import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.app.util.Option;
 import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
-import ghidra.app.util.opinion.LanguageCompilerSpecPair;
 import ghidra.app.util.opinion.LoadSpec;
 import ghidra.framework.model.DomainObject;
+import ghidra.program.model.lang.LanguageCompilerSpecPair;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressOverflowException;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.SymbolTable;
-import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 import nesloader.format.INesHeader;
 import nesloader.mapper.Mapper;
@@ -93,8 +94,8 @@ public class NesLoader extends AbstractLibrarySupportLoader {
             labelVectors(program, log);
             labelRegisters(program, log);
 
-        } catch (CancelledException e) {
-            log.appendMsg(getName(), "Load cancelled.");
+        } catch (AddressOverflowException e) {
+            throw new IOException("Address overflow while mapping ROM: " + e.getMessage(), e);
         }
     }
 
