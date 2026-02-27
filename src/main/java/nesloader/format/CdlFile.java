@@ -2,6 +2,7 @@ package nesloader.format;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
 
 /**
  * Parser for Code/Data Logger (CDL) files.
@@ -39,11 +40,22 @@ public class CdlFile {
      * @param expectedSize expected byte count (must equal PRG-ROM size)
      * @throws IOException if the file cannot be read or its size is wrong
      */
-    public static CdlFile parse(InputStream is, int expectedSize) throws IOException {
+    /**
+     * Reads a CDL file from the given stream.
+     *
+     * @param is           input stream of the CDL file
+     * @param prgRomSize   total PRG-ROM size in bytes (all banks combined)
+     * @throws IOException if the CDL file is smaller than the PRG-ROM
+     */
+    public static CdlFile parse(InputStream is, int prgRomSize) throws IOException {
         byte[] data = is.readAllBytes();
-        if (data.length != expectedSize) {
+        if (data.length < prgRomSize) {
             throw new IOException(String.format(
-                "CDL size mismatch: expected %d bytes, got %d", expectedSize, data.length));
+                "CDL too small: need %d bytes for PRG-ROM, got %d", prgRomSize, data.length));
+        }
+        // CDL files from FCEUX/Mesen may append CHR-ROM data after PRG-ROM — trim it
+        if (data.length > prgRomSize) {
+            data = Arrays.copyOf(data, prgRomSize);
         }
         return new CdlFile(data);
     }

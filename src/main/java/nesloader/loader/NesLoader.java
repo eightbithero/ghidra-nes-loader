@@ -94,6 +94,12 @@ public class NesLoader extends AbstractLibrarySupportLoader {
             labelVectors(program, log);
             labelRegisters(program, log);
 
+            // Store ROM metadata for other analyzers (e.g. CdlAnalyzer)
+            program.getOptions("NES ROM")
+                   .setInt("PRG ROM Size", header.getPrgRomSize());
+            program.getOptions("NES ROM")
+                   .setInt("Mapper", header.getMapperNumber());
+
         } catch (AddressOverflowException e) {
             throw new IOException("Address overflow while mapping ROM: " + e.getMessage(), e);
         }

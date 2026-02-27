@@ -78,9 +78,11 @@ public class NesAnalyzer extends AbstractAnalyzer {
 
             program.getSymbolTable().addExternalEntryPoint(handlerAddr);
 
-            program.getFunctionManager().createFunction(
-                handlerName, handlerAddr,
-                new AddressSet(handlerAddr), SourceType.ANALYSIS);
+            if (program.getFunctionManager().getFunctionAt(handlerAddr) == null) {
+                program.getFunctionManager().createFunction(
+                    handlerName, handlerAddr,
+                    new AddressSet(handlerAddr), SourceType.ANALYSIS);
+            }
 
         } catch (MemoryAccessException e) {
             log.appendMsg(NAME, "Vector at 0x" + Long.toHexString(vectorAddr)

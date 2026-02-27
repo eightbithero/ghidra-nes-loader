@@ -95,17 +95,21 @@ public class CdlAnalyzer extends AbstractAnalyzer {
             return false;
         }
 
-        int prgSize = (int) prgBlock.getSize();
+        // Total PRG-ROM size (all banks) is stored by NesLoader in program properties.
+        // Fall back to the mapped block size if the property is absent.
+        int totalPrgSize = program.getOptions("NES ROM")
+                                  .getInt("PRG ROM Size", (int) prgBlock.getSize());
+
         CdlFile cdl;
         try (FileInputStream fis = new FileInputStream(cdlFile)) {
-            cdl = CdlFile.parse(fis, prgSize);
+            cdl = CdlFile.parse(fis, totalPrgSize);
         } catch (IOException e) {
             log.appendException(e);
             return false;
         }
 
         log.appendMsg(NAME, "Applying CDL hints from " + cdlFile.getName()
-            + " (" + prgSize + " bytes)…");
+            + " (" + totalPrgSize + " bytes PRG)…");
 
         applyCdlHints(program, prgBlock, cdl, monitor, log);
         return true;
