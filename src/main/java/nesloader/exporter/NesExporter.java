@@ -2,6 +2,7 @@ package nesloader.exporter;
 
 import java.io.*;
 import java.util.*;
+import java.util.regex.*;
 
 import ghidra.app.util.DomainObjectService;
 import ghidra.app.util.Option;
@@ -36,13 +37,71 @@ public class NesExporter extends Exporter {
 
     private String sourceNesPath = "";
 
-    public NesExporter() {
-        super("NES ca65 Assembly", "asm", null);
+    // -------------------------------------------------------------------------
+    // Static tables
+    // -------------------------------------------------------------------------
+
+    /** Equate names written to the .asm header — must not be re-emitted as labels. */
+    private static final Set<String> EQUATE_NAMES = Set.of(
+        "PPUCTRL", "PPUMASK", "PPUSTATUS", "OAMADDR", "OAMDATA",
+        "PPUSCROLL", "PPUADDR", "PPUDATA",
+        "SQ1_VOL", "SQ1_SWEEP", "SQ1_LO", "SQ1_HI",
+        "SQ2_VOL", "SQ2_SWEEP", "SQ2_LO", "SQ2_HI",
+        "TRI_LINEAR", "TRI_LO", "TRI_HI",
+        "NOISE_VOL", "NOISE_LO", "NOISE_HI",
+        "DMC_FREQ", "DMC_RAW", "DMC_START", "DMC_LEN",
+        "OAM_DMA", "APU_STATUS", "JOY1", "JOY2",
+        "VEC_NMI", "VEC_RESET", "VEC_IRQ");
+
+    /** 6502 relative-branch mnemonics (the only instructions needing label substitution). */
+    private static final Set<String> BRANCH_MNEMONICS = Set.of(
+        "BEQ", "BNE", "BCC", "BCS", "BMI", "BPL", "BVC", "BVS");
+
+    /** Hardware register address → equate name, used to replace hex literals in output. */
+    private static final Map<Integer, String> HW_REG_MAP = buildHwRegMap();
+
+    private static Map<Integer, String> buildHwRegMap() {
+        Map<Integer, String> m = new LinkedHashMap<>();
+        m.put(0x2000, "PPUCTRL");
+        m.put(0x2001, "PPUMASK");
+        m.put(0x2002, "PPUSTATUS");
+        m.put(0x2003, "OAMADDR");
+        m.put(0x2004, "OAMDATA");
+        m.put(0x2005, "PPUSCROLL");
+        m.put(0x2006, "PPUADDR");
+        m.put(0x2007, "PPUDATA");
+        m.put(0x4000, "SQ1_VOL");
+        m.put(0x4001, "SQ1_SWEEP");
+        m.put(0x4002, "SQ1_LO");
+        m.put(0x4003, "SQ1_HI");
+        m.put(0x4004, "SQ2_VOL");
+        m.put(0x4005, "SQ2_SWEEP");
+        m.put(0x4006, "SQ2_LO");
+        m.put(0x4007, "SQ2_HI");
+        m.put(0x4008, "TRI_LINEAR");
+        m.put(0x400A, "TRI_LO");
+        m.put(0x400B, "TRI_HI");
+        m.put(0x400C, "NOISE_VOL");
+        m.put(0x400E, "NOISE_LO");
+        m.put(0x400F, "NOISE_HI");
+        m.put(0x4010, "DMC_FREQ");
+        m.put(0x4011, "DMC_RAW");
+        m.put(0x4012, "DMC_START");
+        m.put(0x4013, "DMC_LEN");
+        m.put(0x4014, "OAM_DMA");
+        m.put(0x4015, "APU_STATUS");
+        m.put(0x4016, "JOY1");
+        m.put(0x4017, "JOY2");
+        return Collections.unmodifiableMap(m);
     }
 
     // -------------------------------------------------------------------------
-    // Options
+    // Constructor / options
     // -------------------------------------------------------------------------
+
+    public NesExporter() {
+        super("NES ca65 Assembly", "asm", null);
+    }
 
     @Override
     public List<Option> getOptions(DomainObjectService domainObjectService) {
@@ -80,7 +139,6 @@ public class NesExporter extends Exporter {
 
         List<MemoryBlock> prgBlocks = collectPrgBlocks(memory);
 
-        // Try to read iNES header and CHR-ROM from the original .nes file
         byte[] rawInesHeader = null;
         byte[] chrData       = null;
 
@@ -97,16 +155,13 @@ public class NesExporter extends Exporter {
 
         int chrBanks = (rawInesHeader != null) ? (rawInesHeader[5] & 0xFF) : 0;
 
-        // Companion .cfg file (same directory, same base name)
         String baseName = file.getName().replaceAll("\\.[^.]+$", "");
         File cfgFile = new File(file.getParent(), baseName + ".cfg");
 
-        // Write linker config
         try (PrintWriter cfg = new PrintWriter(new FileWriter(cfgFile))) {
             writeCfg(cfg, prgBlocks, chrBanks, chrData != null ? chrData.length : 0);
         }
 
-        // Write assembly source
         try (PrintWriter asm = new PrintWriter(new FileWriter(file))) {
             writeBuildHeader(asm, program, file.getName(), cfgFile.getName());
             writeEquates(asm);
@@ -122,14 +177,6 @@ public class NesExporter extends Exporter {
     // PRG block collection and ordering
     // -------------------------------------------------------------------------
 
-    /**
-     * Returns PRG memory blocks in file order:
-     *  non-overlay blocks sorted ascending by start address (bank 0 before last bank),
-     *  overlay blocks (switchable middle banks) sorted by bank number between them.
-     *
-     * For NROM  : PRG_ROM  or  PRG_ROM_LO, PRG_ROM_HI
-     * For MMC1  : PRG_BANK_0, [PRG_BANK_1..N-2 overlays], PRG_BANK_{N-1}
-     */
     private List<MemoryBlock> collectPrgBlocks(Memory memory) {
         List<MemoryBlock> fixed    = new ArrayList<>();
         List<MemoryBlock> overlays = new ArrayList<>();
@@ -143,8 +190,7 @@ public class NesExporter extends Exporter {
         fixed.sort(Comparator.comparing(MemoryBlock::getStart));
         overlays.sort(Comparator.comparingInt(b -> extractTrailingNumber(b.getName())));
 
-        // Interleave: fixed banks at $8000 first, then overlays, then fixed at $C000+
-        List<MemoryBlock> ordered = new ArrayList<>();
+        List<MemoryBlock> ordered   = new ArrayList<>();
         List<MemoryBlock> highFixed = new ArrayList<>();
 
         for (MemoryBlock b : fixed) {
@@ -159,8 +205,7 @@ public class NesExporter extends Exporter {
     }
 
     private int extractTrailingNumber(String name) {
-        java.util.regex.Matcher m =
-            java.util.regex.Pattern.compile("(\\d+)$").matcher(name);
+        Matcher m = Pattern.compile("(\\d+)$").matcher(name);
         return m.find() ? Integer.parseInt(m.group(1)) : 0;
     }
 
@@ -168,7 +213,6 @@ public class NesExporter extends Exporter {
     // Source .nes file reading
     // -------------------------------------------------------------------------
 
-    /** Returns [byte[] rawInesHeader (16 bytes), byte[] chrData]. Either may be null. */
     private Object[] readInesData(File src) {
         try (RandomAccessFile raf = new RandomAccessFile(src, "r")) {
             byte[] hdr = new byte[16];
@@ -179,11 +223,11 @@ public class NesExporter extends Exporter {
                 return new Object[]{null, null};
             }
 
-            int     prgBanks    = hdr[4] & 0xFF;
-            int     chrBanks    = hdr[5] & 0xFF;
-            boolean trainer     = (hdr[6] & 0x04) != 0;
-            long    chrOffset   = 16L + (trainer ? 512 : 0) + (long) prgBanks * 16384;
-            int     chrSize     = chrBanks * 8192;
+            int     prgBanks  = hdr[4] & 0xFF;
+            int     chrBanks  = hdr[5] & 0xFF;
+            boolean trainer   = (hdr[6] & 0x04) != 0;
+            long    chrOffset = 16L + (trainer ? 512 : 0) + (long) prgBanks * 16384;
+            int     chrSize   = chrBanks * 8192;
 
             byte[] chrData = null;
             if (chrSize > 0 && chrOffset + chrSize <= raf.length()) {
@@ -348,7 +392,6 @@ public class NesExporter extends Exporter {
             asm.printf ("    .byte $%02X                       ; Flags 7  mapper-hi=%d%n",
                         flags7, (flags7 >> 4) & 0xF);
 
-            // Bytes 8–15
             StringBuilder sb = new StringBuilder("    .byte");
             for (int i = 8; i < 16; i++) {
                 sb.append(String.format(" $%02X", rawHdr[i] & 0xFF));
@@ -357,7 +400,6 @@ public class NesExporter extends Exporter {
             sb.append("   ; unused / NES 2.0 extension fields");
             asm.println(sb);
         } else {
-            // Reconstruct from program options
             int prgBanks = prgRomSize / 16384;
             int flags6   = (mapperNum & 0x0F) << 4;
             int flags7   = (mapperNum >> 4)   << 4;
@@ -396,58 +438,186 @@ public class NesExporter extends Exporter {
             }
 
             if (block.isOverlay()) {
-                // Overlay banks are not disassembled by Ghidra; emit raw bytes
                 asm.println("; (overlay bank — raw bytes)");
                 emitRawBlock(asm, block, memory);
             } else {
-                emitCodeUnits(asm, listing, program, memory,
-                              new AddressSet(block.getStart(), block.getEnd()), monitor);
+                AddressSet blockSet = new AddressSet(block.getStart(), block.getEnd());
+                Map<Address, String> extraLabels = collectExtraLabels(listing, blockSet, program);
+                emitCodeUnits(asm, listing, program, memory, blockSet, extraLabels, monitor);
             }
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Label collection — pre-pass for branch targets
+    // -------------------------------------------------------------------------
+
+    /**
+     * Scans all branch instructions in the given address set.
+     * For each branch target that has no usable Ghidra symbol, registers a
+     * synthetic LAB_XXXX label so it can be emitted when that address is reached.
+     */
+    private Map<Address, String> collectExtraLabels(Listing listing, AddressSetView set,
+                                                    Program program) {
+        Map<Address, String> extra = new LinkedHashMap<>();
+
+        CodeUnitIterator it = listing.getCodeUnits(set, true);
+        while (it.hasNext()) {
+            CodeUnit cu = it.next();
+            if (!(cu instanceof Instruction inst)) continue;
+            if (!BRANCH_MNEMONICS.contains(inst.getMnemonicString().toUpperCase())) continue;
+
+            Address[] flows = inst.getFlows();
+            if (flows == null) continue;
+
+            for (Address target : flows) {
+                if (!set.contains(target)) continue;
+                if (usableSymbol(target, program) == null) {
+                    extra.putIfAbsent(target,
+                        String.format("LAB_%04X", target.getOffset()));
+                }
+            }
+        }
+        return extra;
+    }
+
+    /**
+     * Returns the first symbol at {@code addr} whose name is not an equate
+     * constant, or {@code null} if none exists.
+     */
+    private Symbol usableSymbol(Address addr, Program program) {
+        for (Symbol sym : program.getSymbolTable().getSymbols(addr)) {
+            if (!EQUATE_NAMES.contains(sym.getName())) return sym;
+        }
+        return null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Code unit emission
+    // -------------------------------------------------------------------------
+
     /**
      * Iterates code units over the given address set and emits ca65 assembly.
-     * Labels from the symbol table are emitted on their own lines above the unit.
+     *
+     * Label emission rules:
+     *   - Symbols from Ghidra's symbol table are emitted, except those whose
+     *     names clash with the equates declared in writeEquates().
+     *   - If an address has no usable Ghidra symbol but is a branch target,
+     *     the synthetic LAB_XXXX label from extraLabels is emitted instead.
+     *
+     * Instruction formatting:
+     *   - Relative branch instructions use label names (not raw hex addresses)
+     *     so that ca65 can compute the correct signed-byte offset.
+     *   - Hardware register addresses ($2000-$2007, $4000-$4017) are replaced
+     *     with their equate names (PPUCTRL, PPUDATA, JOY1, …).
      */
     private void emitCodeUnits(PrintWriter asm, Listing listing, Program program,
                                Memory memory, AddressSetView set,
+                               Map<Address, String> extraLabels,
                                TaskMonitor monitor) throws IOException {
 
         CodeUnitIterator it = listing.getCodeUnits(set, true);
 
         while (it.hasNext() && !monitor.isCancelled()) {
             CodeUnit cu = it.next();
+            Address  addr = cu.getAddress();
 
-            // Emit labels for this address
-            for (Symbol sym : program.getSymbolTable().getSymbols(cu.getAddress())) {
-                asm.printf("%s:%n", sym.getName());
+            // --- Label emission ---
+            Symbol usable = usableSymbol(addr, program);
+            if (usable != null) {
+                for (Symbol sym : program.getSymbolTable().getSymbols(addr)) {
+                    if (!EQUATE_NAMES.contains(sym.getName())) {
+                        asm.printf("%s:%n", sym.getName());
+                    }
+                }
+            } else {
+                String synth = extraLabels.get(addr);
+                if (synth != null) {
+                    asm.printf("%s:%n", synth);
+                }
             }
 
+            // --- Instruction / data emission ---
             if (cu instanceof Instruction inst) {
-                asm.printf("    %s%n", fixHexPrefix(inst.toString()));
+                asm.printf("    %s%n", formatInstruction(inst, program, extraLabels));
             } else if (cu instanceof Data data) {
                 emitDataUnit(asm, data, memory);
             }
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Instruction formatting
+    // -------------------------------------------------------------------------
+
     /**
-     * Normalises hex literals to ca65 format ($ prefix).
-     * ca65 4.2: accepts '$XXXX' or 'XXXXh'; does NOT accept '0x'.
-     * Ghidra 6502 module emits '0x' prefix.
+     * Formats a single instruction for ca65 output.
+     *
+     * Relative branch instructions are formatted as  MNEMONIC label  so that
+     * ca65 resolves the offset from the label position — avoiding Range errors
+     * that occur when absolute addresses are used in relocatable segments.
+     *
+     * All other instructions go through hex-prefix normalisation and hardware
+     * register address substitution.
+     */
+    private String formatInstruction(Instruction inst, Program program,
+                                     Map<Address, String> extraLabels) {
+        String mnemonic = inst.getMnemonicString().toUpperCase();
+
+        if (BRANCH_MNEMONICS.contains(mnemonic)) {
+            Address[] flows = inst.getFlows();
+            if (flows != null && flows.length == 1) {
+                String label = labelAt(flows[0], program, extraLabels);
+                return mnemonic + " " + label;
+            }
+        }
+
+        return applyHwRegisters(fixHexPrefix(inst.toString()));
+    }
+
+    /**
+     * Returns the label name for {@code addr}: the first usable Ghidra symbol,
+     * or the synthetic LAB_XXXX entry (creating one if necessary).
+     */
+    private String labelAt(Address addr, Program program,
+                           Map<Address, String> extraLabels) {
+        Symbol sym = usableSymbol(addr, program);
+        if (sym != null) return sym.getName();
+        return extraLabels.computeIfAbsent(addr,
+            a -> String.format("LAB_%04X", a.getOffset()));
+    }
+
+    /**
+     * Normalises hex literals from Ghidra format to ca65 format ($-prefix).
+     *   0x1A2B  →  $1A2B
+     *   1A2Bh   →  $1A2B
      */
     private String fixHexPrefix(String s) {
-        // 0x1A2B  →  $1A2B
         s = s.replaceAll("0x([0-9a-fA-F]+)", "\\$$1");
-        // 1A2Bh   →  $1A2B  (trailing-h variant, just in case)
-        s = s.replaceAll("([0-9][0-9a-fA-F]*)h\\b", "\\$$1");
+        s = s.replaceAll("([0-9][0-9a-fA-F]*)h\\b",  "\\$$1");
         return s;
     }
 
     /**
-     * Emits a single Data unit as .byte / .word directive(s).
+     * Replaces hardware-register hex addresses with their equate names.
+     * Example: {@code STA $2007} → {@code STA PPUDATA}.
+     * Matching is case-insensitive and requires the address not to be
+     * followed by another hex digit (to avoid partial matches).
      */
+    private String applyHwRegisters(String text) {
+        for (Map.Entry<Integer, String> e : HW_REG_MAP.entrySet()) {
+            String hexPat = String.format("%04x", e.getKey());
+            text = text.replaceAll(
+                "(?i)\\$" + hexPat + "(?![0-9a-fA-F])",
+                Matcher.quoteReplacement(e.getValue()));
+        }
+        return text;
+    }
+
+    // -------------------------------------------------------------------------
+    // Data unit emission
+    // -------------------------------------------------------------------------
+
     private void emitDataUnit(PrintWriter asm, Data data, Memory memory) throws IOException {
         int len = data.getLength();
         if (len == 0) return;
@@ -460,7 +630,6 @@ public class NesExporter extends Exporter {
             return;
         }
 
-        // Use .word for defined 2-byte data types (pointers / vectors)
         if (len == 2 && isWordType(data)) {
             int lo = bytes[0] & 0xFF;
             int hi = bytes[1] & 0xFF;
@@ -476,9 +645,10 @@ public class NesExporter extends Exporter {
             || typeName.contains("addr");
     }
 
-    /**
-     * Emits a raw memory block as .byte directives (for overlay or unanalyzed blocks).
-     */
+    // -------------------------------------------------------------------------
+    // Raw block emission (overlay banks)
+    // -------------------------------------------------------------------------
+
     private void emitRawBlock(PrintWriter asm, MemoryBlock block, Memory memory)
             throws IOException {
         long remaining = block.getSize();
@@ -498,9 +668,6 @@ public class NesExporter extends Exporter {
         }
     }
 
-    /**
-     * Writes bytes as .byte directives, 16 values per line.
-     */
     private void emitByteLines(PrintWriter asm, byte[] bytes) {
         for (int i = 0; i < bytes.length; i += 16) {
             int end = Math.min(i + 16, bytes.length);
