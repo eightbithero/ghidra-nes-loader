@@ -35,3 +35,4 @@ gradle-local.properties
 *.nes
 *.cfg
 *.asm
+*.o
