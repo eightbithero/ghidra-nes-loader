@@ -31,3 +31,7 @@ ghidra/
 # Local Gradle properties (may contain paths/credentials)
 local.properties
 gradle-local.properties
+
+*.nes
+*.cfg
+*.asm

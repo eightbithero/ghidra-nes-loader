@@ -7,7 +7,7 @@ Ghidra SRE extension for reverse engineering NES ROM files (`.nes`).
 - **Loader** — reads iNES format, builds the full NES CPU address map, labels all hardware registers
 - **NES Analyzer** — resolves NMI / RESET / IRQ-BRK interrupt vectors and creates entry-point functions
 - **CDL Analyzer** — applies Code/Data Logger traces from an emulator to guide disassembly
-- **Exporter** — dumps the disassembled listing as a `.asm` file (ca65 compatible)
+- **Exporter** — exports disassembly as a ca65 v2.18-compatible `.asm` source that reassembles back to a valid `.nes` file
 
 ## Requirements
 
@@ -61,7 +61,39 @@ The CDL file size must exactly match the PRG-ROM size.
 
 ### Exporting
 
-**File → Export Program → NES Assembly Listing** produces a `.asm` file with labels and disassembled instructions.
+**File → Export Program → NES ca65 Assembly** generates two files side-by-side:
+
+| File | Description |
+|------|-------------|
+| `<name>.asm` | ca65 v2.18 assembly source with build instructions in the header comment |
+| `<name>.cfg` | ld65 linker script generated automatically for the ROM's mapper layout |
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| **Source .nes file (for CHR-ROM)** | Path to the original `.nes` file. When set, CHR-ROM data is read and embedded in the `CHARS` segment. If omitted, a placeholder comment with `.incbin` instructions is written instead. |
+
+#### Reassembly
+
+Build instructions are included at the top of the `.asm` file as a comment. In short:
+
+```bash
+ca65 --cpu 6502 -o <name>.o <name>.asm
+ld65 -C <name>.cfg -o <name>.nes <name>.o
+```
+
+Requirements: **ca65 v2.18** and **ld65 v2.18** from the [cc65 toolchain](https://cc65.github.io).
+
+#### Segment layout
+
+| Segment | Content |
+|---------|---------|
+| `HEADER` | 16-byte iNES header |
+| `PRG_ROM` / `PRG_BANK_*` | PRG-ROM code and data (one segment per memory block) |
+| `CHARS` | CHR-ROM pattern table data |
+
+Overlay banks (MMC1 switchable banks 1..N-2) are not disassembled by Ghidra and are emitted as raw `.byte` sequences.
 
 ## Supported Mappers
 
