@@ -12,7 +12,9 @@ import ghidra.framework.model.DomainObject;
 import ghidra.program.model.address.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.*;
+import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.task.TaskMonitor;
 
@@ -155,17 +157,19 @@ public class NesExporter extends Exporter {
         }
 
         int chrBanks = (rawInesHeader != null) ? (rawInesHeader[5] & 0xFF) : 0;
+        boolean hasSram = memory.getBlock("SRAM") != null;
 
         String baseName = file.getName().replaceAll("\\.[^.]+$", "");
         File cfgFile = new File(file.getParent(), baseName + ".cfg");
 
         try (PrintWriter cfg = new PrintWriter(new FileWriter(cfgFile))) {
-            writeCfg(cfg, prgBlocks, chrBanks, chrData != null ? chrData.length : 0);
+            writeCfg(cfg, prgBlocks, chrBanks, chrData != null ? chrData.length : 0, hasSram);
         }
 
         try (PrintWriter asm = new PrintWriter(new FileWriter(file))) {
             writeBuildHeader(asm, program, file.getName(), cfgFile.getName());
             writeEquates(asm);
+            writeRamVariables(asm, program, hasSram);
             writeInesHeaderSegment(asm, program, rawInesHeader, mapperNum, prgRomSize);
             writePrgSegments(asm, program, listing, prgBlocks, memory, monitor);
             writeChrsSegment(asm, chrData);
@@ -249,8 +253,17 @@ public class NesExporter extends Exporter {
     // -------------------------------------------------------------------------
 
     private void writeCfg(PrintWriter cfg, List<MemoryBlock> prgBlocks,
-                          int chrBanks, int chrDataLen) {
+                          int chrBanks, int chrDataLen, boolean hasSram) {
         cfg.println("MEMORY {");
+
+        // RAM areas (nesdev CPU memory map). file="" — not written to the ROM image.
+        cfg.printf ("    %-20s start=$0000, size=$0100, type=rw, file=\"\";%n", "ZP:");
+        cfg.printf ("    %-20s start=$0100, size=$0100, type=rw, file=\"\";%n", "STACK:");
+        cfg.printf ("    %-20s start=$0200, size=$0600, type=rw, file=\"\";%n", "RAM:");
+        if (hasSram) {
+            cfg.printf("    %-20s start=$6000, size=$2000, type=rw, file=\"\";%n", "SRAM:");
+        }
+
         cfg.printf ("    %-20s start=$0000, size=$0010, type=ro, fill=yes, fillval=$FF;%n",
                     "HEADER:");
 
@@ -269,6 +282,12 @@ public class NesExporter extends Exporter {
         cfg.println("}");
         cfg.println();
         cfg.println("SEGMENTS {");
+        cfg.printf ("    %-20s load=ZP, type=zp;%n", "ZEROPAGE:");
+        cfg.printf ("    %-20s load=STACK, type=bss;%n", "STACK:");
+        cfg.printf ("    %-20s load=RAM, type=bss;%n", "BSS:");
+        if (hasSram) {
+            cfg.printf("    %-20s load=SRAM, type=bss;%n", "SRAM:");
+        }
         cfg.printf ("    %-20s load=HEADER, type=ro;%n", "HEADER:");
         for (MemoryBlock b : prgBlocks) {
             cfg.printf("    %-20s load=%s, type=ro;%n",
@@ -359,6 +378,99 @@ public class NesExporter extends Exporter {
         asm.println("VEC_RESET  = $FFFC");
         asm.println("VEC_IRQ    = $FFFE");
         asm.println();
+    }
+
+    // -------------------------------------------------------------------------
+    // RAM variables (ZEROPAGE / BSS / SRAM segments)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Emits Ghidra symbols located in RAM as ca65 variable declarations, so
+     * that instructions referencing them by name assemble correctly.
+     *
+     * Address ranges follow the nesdev CPU memory map:
+     *   $0000-$00FF  zero page          → .segment "ZEROPAGE" (type zp)
+     *   $0100-$01FF  hardware stack     → .segment "STACK" (games may use
+     *                                     part of it as extra work RAM)
+     *   $0200-$07FF  internal RAM       → .segment "BSS"
+     *   $6000-$7FFF  PRG-RAM / SRAM     → .segment "SRAM" (if present)
+     *
+     * Each segment is laid out with .res reservations; unlabeled gaps are
+     * padded so every variable lands on its original address. Segments fill
+     * their memory areas exactly.
+     */
+    private void writeRamVariables(PrintWriter asm, Program program, boolean hasSram) {
+        asm.println("; ---------------------------------------------------------------------------");
+        asm.println("; RAM variables");
+        asm.println("; ---------------------------------------------------------------------------");
+
+        emitRamSegment(asm, program, "ZEROPAGE", 0x0000, 0x00FF, "zero page");
+        emitRamSegment(asm, program, "STACK", 0x0100, 0x01FF, "hardware stack page");
+        emitRamSegment(asm, program, "BSS", 0x0200, 0x07FF, "internal RAM");
+        if (hasSram) {
+            emitRamSegment(asm, program, "SRAM", 0x6000, 0x7FFF, "battery-backed SRAM");
+        }
+        asm.println();
+    }
+
+    /**
+     * Emits one RAM segment: symbols become "name: .res n" reservations,
+     * unlabeled space becomes anonymous ".res" padding.
+     */
+    private void emitRamSegment(PrintWriter asm, Program program, String segName,
+                                long start, long end, String title) {
+        List<Symbol> symbols = collectRamSymbols(program, start, end);
+
+        asm.printf("%n.segment \"%s\"  ; $%04X-$%04X %s%n%n", segName, start, end, title);
+
+        long pos = start;
+        for (int i = 0; i < symbols.size(); i++) {
+            Symbol sym  = symbols.get(i);
+            long   addr = sym.getAddress().getOffset();
+
+            if (addr > pos) {
+                asm.printf("    .res $%04X%-15s ; $%04X-$%04X (unlabeled)%n",
+                           addr - pos, "", pos, addr - 1);
+            }
+
+            // Aliases: additional symbols at the same address.
+            for (Symbol alias : program.getSymbolTable().getSymbols(sym.getAddress())) {
+                if (alias != sym && !EQUATE_NAMES.contains(alias.getName())) {
+                    asm.printf("%s:%n", alias.getName());
+                }
+            }
+
+            long next = (i + 1 < symbols.size())
+                    ? symbols.get(i + 1).getAddress().getOffset()
+                    : end + 1;
+            long len = next - addr;
+
+            asm.printf("%-15s .res $%04X       ; $%04X%s%n",
+                       sym.getName() + ":", len, addr,
+                       len > 1 ? String.format("-$%04X", addr + len - 1) : "");
+            pos = next;
+        }
+
+        if (pos <= end) {
+            asm.printf("    .res $%04X%-15s ; $%04X-$%04X (unlabeled)%n",
+                       end + 1 - pos, "", pos, end);
+        }
+    }
+
+    /** Primary symbols in [start..end] of the default address space, address order. */
+    private List<Symbol> collectRamSymbols(Program program, long start, long end) {
+        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+        AddressSet   range = new AddressSet(space.getAddress(start), space.getAddress(end));
+
+        List<Symbol> symbols = new ArrayList<>();
+        SymbolIterator it = program.getSymbolTable().getPrimarySymbolIterator(range, true);
+        while (it.hasNext()) {
+            Symbol sym = it.next();
+            if (!EQUATE_NAMES.contains(sym.getName())) {
+                symbols.add(sym);
+            }
+        }
+        return symbols;
     }
 
     // -------------------------------------------------------------------------
@@ -623,7 +735,31 @@ public class NesExporter extends Exporter {
             }
         }
 
-        return applyHwRegisters(fixHexPrefix(inst.toString()));
+        String text = applyHwRegisters(fixHexPrefix(inst.toString()));
+
+        // A 3-byte instruction addressing a zero-page location must keep
+        // absolute mode: without "a:" ca65 would pick the 2-byte zero-page
+        // form and shift all following code.
+        if (inst.getLength() == 3 && referencesZeroPage(inst)) {
+            int sp = text.indexOf(' ');
+            if (sp > 0 && sp + 1 < text.length()
+                    && text.charAt(sp + 1) != '(' && text.charAt(sp + 1) != '#') {
+                text = text.substring(0, sp + 1) + "a:" + text.substring(sp + 1);
+            }
+        }
+
+        return text;
+    }
+
+    /** True if the instruction has a memory reference into $0000-$00FF. */
+    private boolean referencesZeroPage(Instruction inst) {
+        for (Reference ref : inst.getReferencesFrom()) {
+            Address to = ref.getToAddress();
+            if (to.isMemoryAddress() && to.getOffset() < 0x100) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
