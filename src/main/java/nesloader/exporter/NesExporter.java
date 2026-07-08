@@ -57,9 +57,12 @@ public class NesExporter extends Exporter {
         "OAM_DMA", "APU_STATUS", "JOY1", "JOY2",
         "VEC_NMI", "VEC_RESET", "VEC_IRQ");
 
-    /** 6502 relative-branch mnemonics (the only instructions needing label substitution). */
+    /** 6502 relative-branch mnemonics. */
     private static final Set<String> BRANCH_MNEMONICS = Set.of(
         "BEQ", "BNE", "BCC", "BCS", "BMI", "BPL", "BVC", "BVS");
+
+    /** Call/jump mnemonics — same single-target flow shape as a branch. */
+    private static final Set<String> CALL_JUMP_MNEMONICS = Set.of("JSR", "JMP");
 
     /** Hardware register address → equate name, used to replace hex literals in output. */
     private static final Map<Integer, String> HW_REG_MAP = buildHwRegMap();
@@ -587,8 +590,8 @@ public class NesExporter extends Exporter {
     // -------------------------------------------------------------------------
 
     /**
-     * Scans all branch instructions in the given address set.
-     * For each branch target that has no usable Ghidra symbol, registers a
+     * Scans all branch/call/jump instructions in the given address set.
+     * For each target that has no usable Ghidra symbol, registers a
      * synthetic LAB_XXXX label so it can be emitted when that address is reached.
      */
     private Map<Address, String> collectExtraLabels(Listing listing, AddressSetView set,
@@ -599,7 +602,10 @@ public class NesExporter extends Exporter {
         while (it.hasNext()) {
             CodeUnit cu = it.next();
             if (!(cu instanceof Instruction inst)) continue;
-            if (!BRANCH_MNEMONICS.contains(inst.getMnemonicString().toUpperCase())) continue;
+            String mnemonic = inst.getMnemonicString().toUpperCase();
+            if (!BRANCH_MNEMONICS.contains(mnemonic) && !CALL_JUMP_MNEMONICS.contains(mnemonic)) {
+                continue;
+            }
 
             Address[] flows = inst.getFlows();
             if (flows == null) continue;
@@ -742,9 +748,11 @@ public class NesExporter extends Exporter {
     /**
      * Formats a single instruction for ca65 output.
      *
-     * Relative branch instructions are formatted as  MNEMONIC label  so that
-     * ca65 resolves the offset from the label position — avoiding Range errors
-     * that occur when absolute addresses are used in relocatable segments.
+     * Branch/JSR/JMP instructions are formatted as  MNEMONIC label  (or
+     * MNEMONIC (label) for indirect JMP) using the flow target's symbol —
+     * for branches this also avoids Range errors that occur when absolute
+     * addresses are used in relocatable segments; for JSR/JMP it just gives
+     * readable output instead of a raw hex call/jump target.
      *
      * All other instructions go through hex-prefix normalisation and hardware
      * register address substitution.
@@ -753,11 +761,13 @@ public class NesExporter extends Exporter {
                                      Map<Address, String> extraLabels) {
         String mnemonic = inst.getMnemonicString().toUpperCase();
 
-        if (BRANCH_MNEMONICS.contains(mnemonic)) {
+        if (BRANCH_MNEMONICS.contains(mnemonic) || CALL_JUMP_MNEMONICS.contains(mnemonic)) {
             Address[] flows = inst.getFlows();
             if (flows != null && flows.length == 1) {
                 String label = labelAt(flows[0], program, extraLabels);
-                return mnemonic + " " + label;
+                // JMP can be indirect ("JMP ($1234)"); branches/JSR never are.
+                boolean indirect = inst.toString().contains("(");
+                return indirect ? mnemonic + " (" + label + ")" : mnemonic + " " + label;
             }
         }
 
