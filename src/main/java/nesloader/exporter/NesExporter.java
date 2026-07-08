@@ -18,6 +18,8 @@ import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.task.TaskMonitor;
 
+import nesloader.util.NesMemoryMap;
+
 /**
  * Exports the disassembled NES program as a ca65 v2.18-compatible assembly source.
  *
@@ -421,8 +423,17 @@ public class NesExporter extends Exporter {
                                 long start, long end, String title) {
         List<Symbol> symbols = collectRamSymbols(program, start, end);
 
+        String exportDirective = segName.equals("ZEROPAGE") ? ".exportzp" : ".export";
+        for (Symbol sym : symbols) {
+            long addr = sym.getAddress().getOffset();
+            asm.printf("%-25s %-15s ; $%0" + (addr <= 0xFF ? 2 : 4) + "X%n",
+                       exportDirective, sym.getName(), addr);
+        }
+        if (!symbols.isEmpty()) asm.println();
+
         asm.printf("%n.segment \"%s\"  ; $%04X-$%04X %s%n%n", segName, start, end, title);
 
+        Listing listing = program.getListing();
         long pos = start;
         for (int i = 0; i < symbols.size(); i++) {
             Symbol sym  = symbols.get(i);
@@ -445,9 +456,19 @@ public class NesExporter extends Exporter {
                     : end + 1;
             long len = next - addr;
 
-            asm.printf("%-15s .res $%04X       ; $%04X%s%n",
+            CodeUnit cu = listing.getCodeUnitAt(sym.getAddress());
+            String[] eolLines = cu != null ? splitComment(cu.getComment(CommentType.EOL))
+                                            : new String[0];
+            String inline = eolLines.length > 0 ? "  ; " + eolLines[0] : "";
+
+            asm.printf("%-15s .res $%04X       ; $%04X%s%s%n",
                        sym.getName() + ":", len, addr,
-                       len > 1 ? String.format("-$%04X", addr + len - 1) : "");
+                       len > 1 ? String.format("-$%04X", addr + len - 1) : "", inline);
+
+            for (int j = 1; j < eolLines.length; j++) {
+                asm.println(INDENT + "; " + eolLines[j]);
+            }
+
             pos = next;
         }
 
@@ -597,9 +618,14 @@ public class NesExporter extends Exporter {
     /**
      * Returns the first symbol at {@code addr} whose name is not an equate
      * constant, or {@code null} if none exists.
+     *
+     * Dynamic symbols (e.g. Ghidra's auto-generated "DAT_0049") are skipped:
+     * they exist only for the listing display and are never persisted, so
+     * referencing them by name would produce an undefined symbol in ca65.
      */
     private Symbol usableSymbol(Address addr, Program program) {
         for (Symbol sym : program.getSymbolTable().getSymbols(addr)) {
+            if (sym.isDynamic()) continue;
             if (!EQUATE_NAMES.contains(sym.getName())) return sym;
         }
         return null;
@@ -735,7 +761,11 @@ public class NesExporter extends Exporter {
             }
         }
 
-        String text = applyHwRegisters(fixHexPrefix(inst.toString()));
+        String text = fixHexPrefix(inst.toString());
+        text = stripDynamicNames(text, inst, program);
+        text = applyHwRegisters(text);
+        text = applyRamSymbols(text, inst, program);
+        text = fixArrayIndexSyntax(text);
 
         // A 3-byte instruction addressing a zero-page location must keep
         // absolute mode: without "a:" ca65 would pick the 2-byte zero-page
@@ -786,6 +816,21 @@ public class NesExporter extends Exporter {
     }
 
     /**
+     * Converts Ghidra's array-index operand syntax (used when a reference
+     * lands inside a labeled range rather than exactly on it) into a ca65
+     * arithmetic expression.
+     *   NAME[21]   →  NAME+21
+     *   NAME[-3]   →  NAME-3
+     */
+    private String fixArrayIndexSyntax(String text) {
+        Matcher m = Pattern.compile("\\[(-?[0-9A-Za-z$]+)\\]").matcher(text);
+        return m.replaceAll(mr -> {
+            String offset = mr.group(1);
+            return offset.startsWith("-") ? offset : "+" + offset;
+        });
+    }
+
+    /**
      * Replaces hardware-register hex addresses with their equate names.
      * Example: {@code STA $2007} → {@code STA PPUDATA}.
      * Matching is case-insensitive and requires the address not to be
@@ -797,6 +842,61 @@ public class NesExporter extends Exporter {
             text = text.replaceAll(
                 "(?i)\\$" + hexPat + "(?![0-9a-fA-F])",
                 Matcher.quoteReplacement(e.getValue()));
+        }
+        return text;
+    }
+
+    /**
+     * Replaces hex operand addresses that reference a named RAM/zero-page/SRAM
+     * symbol with that symbol's name, so instructions read e.g. {@code LDA MYVAR}
+     * instead of {@code LDA $0300}. Only touches addresses reached via a memory
+     * reference from this instruction (so unrelated immediate hex values are
+     * left untouched), and only when a usable Ghidra symbol exists there.
+     */
+    private String applyRamSymbols(String text, Instruction inst, Program program) {
+        for (Reference ref : inst.getReferencesFrom()) {
+            Address to = ref.getToAddress();
+            if (!to.isMemoryAddress() || !isRamAddress(to.getOffset())) continue;
+
+            Symbol sym = usableSymbol(to, program);
+            if (sym == null) continue;
+
+            // Matches both the 2-digit (zero-page mode) and 4-digit
+            // (forced-absolute mode) hex forms Ghidra may print for the address.
+            String hex = Long.toHexString(to.getOffset());
+            text = text.replaceAll("(?i)\\$0*" + hex + "(?![0-9a-fA-F])",
+                Matcher.quoteReplacement(sym.getName()));
+        }
+        return text;
+    }
+
+    /** True if {@code off} falls within the CPU-internal RAM or SRAM ranges. */
+    private boolean isRamAddress(long off) {
+        return (off >= NesMemoryMap.RAM_START && off <= NesMemoryMap.RAM_END)
+            || (off >= NesMemoryMap.SRAM_START && off <= NesMemoryMap.SRAM_END);
+    }
+
+    /**
+     * Replaces Ghidra's auto-generated dynamic names (e.g. {@code DAT_0049},
+     * {@code LAB_fe12}) with the raw hex address they stand for.
+     *
+     * These names are synthesized on the fly by Ghidra purely for the listing
+     * display — {@link Symbol#isDynamic()} — and are never persisted, so they
+     * are never declared anywhere in the exported source. Left as-is they
+     * assemble as references to an undefined ca65 symbol.
+     */
+    private String stripDynamicNames(String text, Instruction inst, Program program) {
+        for (Reference ref : inst.getReferencesFrom()) {
+            Address to = ref.getToAddress();
+            if (!to.isMemoryAddress()) continue;
+
+            Symbol sym = program.getSymbolTable().getPrimarySymbol(to);
+            if (sym == null || !sym.isDynamic()) continue;
+
+            int digits = inst.getLength() >= 3 ? 4 : 2;
+            String hex = String.format("$%0" + digits + "X", to.getOffset());
+            text = text.replaceAll("\\b" + Pattern.quote(sym.getName()) + "\\b",
+                Matcher.quoteReplacement(hex));
         }
         return text;
     }

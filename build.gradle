@@ -14,3 +14,22 @@ if (ghidraInstallDir) {
 } else {
     throw new GradleException("GHIDRA_INSTALL_DIR is not defined!")
 }
+
+// -----------------------------------------------------------------------
+// Extension version (X.Y.Z, stored in gradle.properties as "version=...").
+// The patch component (Z) is bumped every time the distributable is built.
+// -----------------------------------------------------------------------
+if (gradle.startParameter.taskNames.any { it.contains("buildExtension") }) {
+    File propsFile = file("gradle.properties")
+
+    List<String> parts = "${project.version}".tokenize('.')
+    while (parts.size() < 3) parts << '0'
+    parts[2] = (parts[2].toInteger() + 1).toString()
+    String newVersion = parts.join('.')
+
+    // Rewrite only the "version=" line, leaving comments/formatting untouched.
+    propsFile.text = propsFile.text.replaceFirst(/(?m)^version=.*$/, "version=${newVersion}")
+
+    project.version = newVersion
+    println "Extension version bumped to ${newVersion}"
+}
