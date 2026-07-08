@@ -510,6 +510,14 @@ public class NesExporter extends Exporter {
      *     so that ca65 can compute the correct signed-byte offset.
      *   - Hardware register addresses ($2000-$2007, $4000-$4017) are replaced
      *     with their equate names (PPUCTRL, PPUDATA, JOY1, …).
+     *
+     * Comment emission (ca65 ";" syntax, multi-line comments become one
+     * ";"-prefixed line per source line):
+     *   - plate  — above the label, at column 0
+     *   - pre    — after the label, indented
+     *   - eol    — inline after the instruction/data (extra lines follow below);
+     *              falls back to the repeatable comment when absent
+     *   - post   — below the code unit, indented
      */
     private void emitCodeUnits(PrintWriter asm, Listing listing, Program program,
                                Memory memory, AddressSetView set,
@@ -521,6 +529,8 @@ public class NesExporter extends Exporter {
         while (it.hasNext() && !monitor.isCancelled()) {
             CodeUnit cu = it.next();
             Address  addr = cu.getAddress();
+
+            emitCommentLines(asm, cu.getComment(CommentType.PLATE), "");
 
             // --- Label emission ---
             Symbol usable = usableSymbol(addr, program);
@@ -537,12 +547,52 @@ public class NesExporter extends Exporter {
                 }
             }
 
+            emitCommentLines(asm, cu.getComment(CommentType.PRE), INDENT);
+
+            String eol = cu.getComment(CommentType.EOL);
+            if (eol == null) {
+                eol = cu.getComment(CommentType.REPEATABLE);
+            }
+            String[] eolLines = splitComment(eol);
+            String   inline   = eolLines.length > 0 ? "  ; " + eolLines[0] : "";
+
             // --- Instruction / data emission ---
             if (cu instanceof Instruction inst) {
-                asm.printf("    %s%n", formatInstruction(inst, program, extraLabels));
+                asm.printf("    %s%s%n",
+                           formatInstruction(inst, program, extraLabels), inline);
             } else if (cu instanceof Data data) {
-                emitDataUnit(asm, data, memory);
+                emitDataUnit(asm, data, memory, inline);
             }
+
+            for (int i = 1; i < eolLines.length; i++) {
+                asm.println(INDENT + "; " + eolLines[i]);
+            }
+
+            emitCommentLines(asm, cu.getComment(CommentType.POST), INDENT);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Comment emission
+    // -------------------------------------------------------------------------
+
+    private static final String INDENT = "    ";
+
+    /** Splits a Ghidra comment into individual lines; empty array when absent. */
+    private String[] splitComment(String comment) {
+        if (comment == null || comment.isEmpty()) {
+            return new String[0];
+        }
+        return comment.split("\\r?\\n", -1);
+    }
+
+    /**
+     * Emits a (possibly multi-line) Ghidra comment as a sequence of
+     * single-line ca65 comments, one "; " line per source line.
+     */
+    private void emitCommentLines(PrintWriter asm, String comment, String indent) {
+        for (String line : splitComment(comment)) {
+            asm.println(indent + "; " + line);
         }
     }
 
@@ -618,7 +668,8 @@ public class NesExporter extends Exporter {
     // Data unit emission
     // -------------------------------------------------------------------------
 
-    private void emitDataUnit(PrintWriter asm, Data data, Memory memory) throws IOException {
+    private void emitDataUnit(PrintWriter asm, Data data, Memory memory, String inlineComment)
+            throws IOException {
         int len = data.getLength();
         if (len == 0) return;
 
@@ -633,9 +684,9 @@ public class NesExporter extends Exporter {
         if (len == 2 && isWordType(data)) {
             int lo = bytes[0] & 0xFF;
             int hi = bytes[1] & 0xFF;
-            asm.printf("    .word $%04X%n", lo | (hi << 8));
+            asm.printf("    .word $%04X%s%n", lo | (hi << 8), inlineComment);
         } else {
-            emitByteLines(asm, bytes);
+            emitByteLines(asm, bytes, inlineComment);
         }
     }
 
@@ -669,6 +720,11 @@ public class NesExporter extends Exporter {
     }
 
     private void emitByteLines(PrintWriter asm, byte[] bytes) {
+        emitByteLines(asm, bytes, "");
+    }
+
+    /** Emits .byte lines; {@code firstLineComment} is appended to the first line only. */
+    private void emitByteLines(PrintWriter asm, byte[] bytes, String firstLineComment) {
         for (int i = 0; i < bytes.length; i += 16) {
             int end = Math.min(i + 16, bytes.length);
             StringBuilder sb = new StringBuilder("    .byte ");
@@ -676,6 +732,7 @@ public class NesExporter extends Exporter {
                 sb.append(String.format("$%02X", bytes[j] & 0xFF));
                 if (j < end - 1) sb.append(", ");
             }
+            if (i == 0) sb.append(firstLineComment);
             asm.println(sb);
         }
     }
