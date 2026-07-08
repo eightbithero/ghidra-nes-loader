@@ -105,7 +105,8 @@ public class NesExporter extends Exporter {
 
     @Override
     public List<Option> getOptions(DomainObjectService domainObjectService) {
-        return List.of(new Option(OPT_SRC_ROM, sourceNesPath));
+        return List.of(new FileChooserOption(OPT_SRC_ROM, sourceNesPath,
+            "NES ROM files", "nes"));
     }
 
     @Override
