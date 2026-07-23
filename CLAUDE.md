@@ -19,6 +19,8 @@ https://www.nesdev.org/wiki/INES
 
 ## Supported Mappers
 Nintendo MMC1 https://www.nesdev.org/wiki/MMC1
+UxROM https://www.nesdev.org/wiki/UxROM (ines mapper 2 + ines mapper 71)
+AxROM https://www.nesdev.org/wiki/AxROM
 
 ## APU Registers
 https://www.nesdev.org/wiki/APU_registers

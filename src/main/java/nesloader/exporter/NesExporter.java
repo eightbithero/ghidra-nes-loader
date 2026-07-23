@@ -331,6 +331,10 @@ public class NesExporter extends Exporter {
         asm.printf (";   ca65 --cpu 6502 -o %s.o %s && ld65 -C %s -o %s.nes %s.o%n",
                     base, asmName, cfgName, base, base);
         asm.println(";");
+        asm.println("; With debug info (for use with debuggers, e.g. Mesen/FCEUX):");
+        asm.printf (";   ca65 --cpu 6502 -g -o %s.o %s%n", base, asmName);
+        asm.printf (";   ld65 -C %s --dbgfile %s.dbg -o %s.nes %s.o%n", cfgName, base, base, base);
+        asm.println(";");
         asm.printf ("; The linker script '%s' is generated alongside this file.%n", cfgName);
         asm.println("; If CHR-ROM was not embedded, see the CHARS segment at the end of this file.");
         asm.println("; ===========================================================================");

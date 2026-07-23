@@ -24,9 +24,11 @@ import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.util.task.TaskMonitor;
 import nesloader.format.INesHeader;
+import nesloader.mapper.AxRomMapper;
 import nesloader.mapper.Mapper;
 import nesloader.mapper.Mmc1Mapper;
 import nesloader.mapper.NromMapper;
+import nesloader.mapper.UxRomMapper;
 import nesloader.util.NesMemoryMap;
 
 /**
@@ -114,10 +116,11 @@ public class NesLoader extends AbstractLibrarySupportLoader {
 
         AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
 
-        // Internal 2 KB RAM ($0000-$07FF)
+        // Internal 2 KB RAM: $0000-$01FF is covered by the language-defined
+        // ZERO_PAGE and STACK blocks (6502.pspec), so map only $0200-$07FF here.
         MemoryBlockUtils.createUninitializedBlock(program, false, "RAM",
-            space.getAddress(NesMemoryMap.RAM_START), NesMemoryMap.RAM_SIZE,
-            "CPU internal RAM (2 KB)", "NES Loader", true, true, false, log);
+            space.getAddress(NesMemoryMap.RAM_START + 0x200), NesMemoryMap.RAM_SIZE - 0x200,
+            "CPU internal RAM ($0200-$07FF)", "NES Loader", true, true, false, log);
 
         // PPU registers ($2000-$2007)
         MemoryBlockUtils.createUninitializedBlock(program, false, "PPU_REGS",
@@ -214,6 +217,8 @@ public class NesLoader extends AbstractLibrarySupportLoader {
         return switch (header.getMapperNumber()) {
             case 0 -> new NromMapper();
             case 1 -> new Mmc1Mapper();
+            case 2, 71 -> new UxRomMapper(header.getMapperNumber());
+            case 7 -> new AxRomMapper();
             default -> {
                 log.appendMsg(getName(),
                     "Unsupported mapper " + header.getMapperNumber() + ", using NROM fallback.");

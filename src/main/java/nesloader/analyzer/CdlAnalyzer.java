@@ -3,7 +3,10 @@ package nesloader.analyzer;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import ghidra.app.cmd.data.CreateDataCmd;
 import ghidra.app.cmd.disassemble.DisassembleCommand;
@@ -16,7 +19,6 @@ import ghidra.framework.options.Options;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
-import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.data.ByteDataType;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
@@ -89,16 +91,19 @@ public class CdlAnalyzer extends AbstractAnalyzer {
             return false;
         }
 
-        MemoryBlock prgBlock = findPrgBlock(program.getMemory());
-        if (prgBlock == null) {
+        List<PrgRange> prgRanges = findPrgRanges(program.getMemory());
+        if (prgRanges.isEmpty()) {
             log.appendMsg(NAME, "PRG-ROM memory block not found.");
             return false;
         }
 
         // Total PRG-ROM size (all banks) is stored by NesLoader in program properties.
-        // Fall back to the mapped block size if the property is absent.
+        // Fall back to the mapped extent if the property is absent.
+        int mappedPrgSize = prgRanges.stream()
+                .mapToInt(r -> (int) (r.fileStart() + r.block().getSize()))
+                .max().orElse(0);
         int totalPrgSize = program.getOptions("NES ROM")
-                                  .getInt("PRG ROM Size", (int) prgBlock.getSize());
+                                  .getInt("PRG ROM Size", mappedPrgSize);
 
         CdlFile cdl;
         try (FileInputStream fis = new FileInputStream(cdlFile)) {
@@ -111,44 +116,71 @@ public class CdlAnalyzer extends AbstractAnalyzer {
         log.appendMsg(NAME, "Applying CDL hints from " + cdlFile.getName()
             + " (" + totalPrgSize + " bytes PRG)…");
 
-        applyCdlHints(program, prgBlock, cdl, monitor, log);
+        applyCdlHints(program, prgRanges, cdl, monitor, log);
         return true;
     }
 
     // -------------------------------------------------------------------------
 
-    private MemoryBlock findPrgBlock(Memory memory) {
-        for (String name : List.of("PRG_ROM", "PRG_ROM_LO", "PRG_BANK_0")) {
-            MemoryBlock block = memory.getBlock(name);
-            if (block != null) return block;
+    /** A PRG-ROM memory block together with its byte offset inside the PRG-ROM data. */
+    private record PrgRange(long fileStart, MemoryBlock block) {}
+
+    private static final Pattern BANK_NAME = Pattern.compile("PRG_BANK_(\\d+)");
+
+    /**
+     * Maps each PRG-ROM memory block (including overlay bank blocks) to the range
+     * of PRG-ROM file offsets it was loaded from, based on the naming conventions
+     * of the mapper implementations.  PRG_ROM_HI (NROM 16 KB mirror) is skipped
+     * so hints are not applied twice.
+     */
+    private List<PrgRange> findPrgRanges(Memory memory) {
+        List<PrgRange> ranges = new ArrayList<>();
+        for (MemoryBlock block : memory.getBlocks()) {
+            String name = block.getName();
+            if (name.equals("PRG_ROM") || name.equals("PRG_ROM_LO")) {
+                ranges.add(new PrgRange(0, block));
+                continue;
+            }
+            Matcher m = BANK_NAME.matcher(name);
+            if (m.matches()) {
+                int bank = Integer.parseInt(m.group(1));
+                ranges.add(new PrgRange(bank * block.getSize(), block));
+            }
         }
-        return null;
+        return ranges;
     }
 
-    private void applyCdlHints(Program program, MemoryBlock prgBlock, CdlFile cdl,
+    private void applyCdlHints(Program program, List<PrgRange> prgRanges, CdlFile cdl,
                                 TaskMonitor monitor, MessageLog log) {
 
-        AddressSpace space   = program.getAddressFactory().getDefaultAddressSpace();
-        Listing listing      = program.getListing();
-        long prgStart        = prgBlock.getStart().getOffset();
+        Listing listing = program.getListing();
 
         AddressSet codeSet = new AddressSet();
         int dataCount = 0;
 
         monitor.setMaximum(cdl.size());
+        long processed = 0;
 
-        for (int i = 0; i < cdl.size(); i++) {
+        for (PrgRange range : prgRanges) {
             if (monitor.isCancelled()) break;
-            monitor.setProgress(i);
 
-            Address addr = space.getAddress(prgStart + i);
+            Address blockStart = range.block().getStart();
+            long from = range.fileStart();
+            long to   = Math.min(from + range.block().getSize(), cdl.size());
 
-            if (cdl.isCode(i)) {
-                codeSet.add(addr);
-            } else if (cdl.isData(i) && listing.getUndefinedDataAt(addr) != null) {
-                CreateDataCmd cmd = new CreateDataCmd(addr, ByteDataType.dataType);
-                cmd.applyTo(program);
-                dataCount++;
+            for (long i = from; i < to; i++) {
+                if (monitor.isCancelled()) break;
+                monitor.setProgress(processed++);
+
+                Address addr = blockStart.add(i - from);
+
+                if (cdl.isCode((int) i)) {
+                    codeSet.add(addr);
+                } else if (cdl.isData((int) i) && listing.getUndefinedDataAt(addr) != null) {
+                    CreateDataCmd cmd = new CreateDataCmd(addr, ByteDataType.dataType);
+                    cmd.applyTo(program);
+                    dataCount++;
+                }
             }
         }
 
