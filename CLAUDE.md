@@ -20,6 +20,7 @@ https://www.nesdev.org/wiki/INES
 ## Supported Mappers
 Nintendo MMC1 https://www.nesdev.org/wiki/MMC1
 UxROM https://www.nesdev.org/wiki/UxROM (ines mapper 2 + ines mapper 71)
+Nintendo MMC3 https://www.nesdev.org/wiki/MMC3 (ines mapper 4)
 AxROM https://www.nesdev.org/wiki/AxROM
 
 ## Adding a new bank-switching mapper

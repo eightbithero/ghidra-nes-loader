@@ -73,10 +73,13 @@ CHR ROM or RAM; bus conflicts (affects how bank-switch code looks, not layout).
 Then:
 1. Mapper class in `nesloader/mapper/` implementing `Mapper.mapMemory` per the
    principles above; register the iNES number in `NesLoader.getMapper`.
-2. If bank size ≠ block size or windows are non-uniform (e.g. MMC3's two 8 KB
-   switchable + two fixed 8 KB windows), check the `CdlAnalyzer` offset
-   formula and `collectPrgBlocks` ordering still hold — extend them, don't
-   fork the naming.
+2. If bank size ≠ block size or windows are non-uniform, check the
+   `CdlAnalyzer` offset formula and `collectPrgBlocks` ordering still hold —
+   extend them, don't fork the naming. Worked example: `Mmc3Mapper` — 8 KB
+   banks, a single 24 KB `PRG_WINDOW` over the three switchable windows
+   `$8000/$A000/$C000`, only the hardwired last bank at `$E000` in the
+   default space; the always-resident second-to-last bank stays an overlay
+   because its position depends on a runtime mode bit.
 3. Verify (headless recipe below): block map, per-bank vectors, zero
    instructions in the default-space window, export round-trip byte-identical.
 
@@ -104,4 +107,5 @@ original ROM — must be byte-identical.
 
 Reference ROMs used so far: mapper 1 — `snkrnr.nes.nes` (repo root, 2 banks),
 mapper 71 — Micro Machines (16 banks), mapper 7 — Solar Jetman (8 banks),
-both in `~/workbench/sj_decomp/`.
+both in `~/workbench/sj_decomp/`; mapper 4 — Kirby's Adventure
+(`~/workbench/ka_decomp/`, 64 × 8 KB banks, NES 2.0 header, battery SRAM).

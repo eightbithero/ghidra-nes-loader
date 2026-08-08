@@ -27,6 +27,7 @@ import nesloader.format.INesHeader;
 import nesloader.mapper.AxRomMapper;
 import nesloader.mapper.Mapper;
 import nesloader.mapper.Mmc1Mapper;
+import nesloader.mapper.Mmc3Mapper;
 import nesloader.mapper.NromMapper;
 import nesloader.mapper.UxRomMapper;
 import ghidra.program.model.mem.Memory;
@@ -237,6 +238,7 @@ public class NesLoader extends AbstractLibrarySupportLoader {
             case 0 -> new NromMapper();
             case 1 -> new Mmc1Mapper();
             case 2, 71 -> new UxRomMapper(header.getMapperNumber());
+            case 4 -> new Mmc3Mapper();
             case 7 -> new AxRomMapper();
             default -> {
                 log.appendMsg(getName(),
