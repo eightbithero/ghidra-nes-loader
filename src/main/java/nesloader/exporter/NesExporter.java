@@ -193,6 +193,9 @@ public class NesExporter extends Exporter {
 
         for (MemoryBlock b : memory.getBlocks()) {
             if (!b.getName().startsWith("PRG_")) continue;
+            // PRG_WINDOW has no bytes and must not become a cfg MEMORY region
+            // (fill=yes would inject a phantom 16 KB bank into the rebuilt ROM)
+            if (!b.isInitialized()) continue;
             if (b.isOverlay()) overlays.add(b);
             else               fixed.add(b);
         }
@@ -568,6 +571,10 @@ public class NesExporter extends Exporter {
         asm.println("; PRG-ROM code and data");
         asm.println("; ---------------------------------------------------------------------------");
 
+        writeWindowEquates(asm, program, memory);
+
+        Map<Address, String> danglingLabels = new LinkedHashMap<>();
+
         for (MemoryBlock block : prgBlocks) {
             if (monitor.isCancelled()) break;
 
@@ -585,7 +592,59 @@ public class NesExporter extends Exporter {
                 AddressSet blockSet = new AddressSet(block.getStart(), block.getEnd());
                 Map<Address, String> extraLabels = collectExtraLabels(listing, blockSet, program);
                 emitCodeUnits(asm, listing, program, memory, blockSet, extraLabels, monitor);
+
+                // Synthetic labels created for flow targets outside this block
+                // in uninitialized/unmapped memory (the switchable window) are
+                // never emitted as labels — collect them for equate output.
+                for (Map.Entry<Address, String> e : extraLabels.entrySet()) {
+                    if (blockSet.contains(e.getKey())) continue;
+                    MemoryBlock target = memory.getBlock(e.getKey());
+                    if (target == null || !target.isInitialized()) {
+                        danglingLabels.putIfAbsent(e.getKey(), e.getValue());
+                    }
+                }
             }
+        }
+
+        if (!danglingLabels.isEmpty()) {
+            asm.println();
+            asm.println("; Flow targets in the switchable PRG window (bank-dependent)");
+            for (Map.Entry<Address, String> e : danglingLabels.entrySet()) {
+                asm.printf("%-15s := $%04X%n", e.getValue(), e.getKey().getOffset());
+            }
+        }
+    }
+
+    /**
+     * Symbols living in uninitialized PRG window blocks (e.g. PRG_WINDOW) are
+     * referenced by name from the fixed bank, but the window itself carries no
+     * bytes and is not exported — declare them as equates so ca65 can resolve
+     * the references.  The actual code behind each address depends on which
+     * bank is mapped at runtime.
+     */
+    private void writeWindowEquates(PrintWriter asm, Program program, Memory memory) {
+        List<Symbol> symbols = new ArrayList<>();
+        for (MemoryBlock b : memory.getBlocks()) {
+            if (!b.getName().startsWith("PRG_")) continue;
+            if (b.isInitialized() || b.isOverlay()) continue;
+
+            AddressSet range = new AddressSet(b.getStart(), b.getEnd());
+            SymbolIterator it = program.getSymbolTable().getPrimarySymbolIterator(range, true);
+            while (it.hasNext()) {
+                for (Symbol sym : program.getSymbolTable().getSymbols(it.next().getAddress())) {
+                    if (!sym.isDynamic() && !EQUATE_NAMES.contains(sym.getName())) {
+                        symbols.add(sym);
+                    }
+                }
+            }
+        }
+        if (symbols.isEmpty()) return;
+
+        asm.println();
+        asm.println("; Symbols in the switchable PRG window (bank-dependent targets;");
+        asm.println("; the window block is uninitialized and not exported)");
+        for (Symbol sym : symbols) {
+            asm.printf("%-15s := $%04X%n", sym.getName(), sym.getAddress().getOffset());
         }
     }
 
@@ -953,20 +1012,21 @@ public class NesExporter extends Exporter {
 
     private void emitRawBlock(PrintWriter asm, MemoryBlock block, Memory memory)
             throws IOException {
-        long remaining = block.getSize();
-        Address addr   = block.getStart();
-        byte[]  buf    = new byte[256];
+        long size  = block.getSize();
+        byte[] buf = new byte[256];
 
-        while (remaining > 0) {
-            int chunk = (int) Math.min(remaining, buf.length);
+        // Advance by offset from the block start: a bank ending at $FFFF sits
+        // on the address-space boundary, and addr.add(chunk) past the last
+        // byte would throw AddressOutOfBoundsException.
+        for (long off = 0; off < size; off += buf.length) {
+            int chunk    = (int) Math.min(size - off, buf.length);
+            Address addr = block.getStart().add(off);
             try {
                 memory.getBytes(addr, buf, 0, chunk);
                 emitByteLines(asm, Arrays.copyOf(buf, chunk));
             } catch (MemoryAccessException e) {
                 asm.printf("    ; [unreadable %d byte(s) at %s]%n", chunk, addr);
             }
-            addr       = addr.add(chunk);
-            remaining -= chunk;
         }
     }
 

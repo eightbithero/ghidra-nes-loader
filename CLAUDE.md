@@ -22,6 +22,16 @@ Nintendo MMC1 https://www.nesdev.org/wiki/MMC1
 UxROM https://www.nesdev.org/wiki/UxROM (ines mapper 2 + ines mapper 71)
 AxROM https://www.nesdev.org/wiki/AxROM
 
+## Adding a new bank-switching mapper
+MUST follow docs/MAPPER_GUIDELINES.md. Key rules: only hardwired banks go into
+the default address space; every switchable bank (including bank 0) is an
+overlay block `PRG_BANK_<n>`; the switchable window is an uninitialized
+`PRG_WINDOW` block when fixed code references it, or nothing at all when the
+whole $8000-$FFFF switches (AxROM). Vectors, VEC_* labels and export equates
+are handled generically — do not duplicate in mappers. Verify with the
+headless recipe in the doc (import layout dump + ca65/ld65 round-trip must be
+byte-identical).
+
 ## APU Registers
 https://www.nesdev.org/wiki/APU_registers
 

@@ -15,11 +15,12 @@ import nesloader.format.INesHeader;
 /**
  * AxROM — mapper 7.
  *
- * The whole $8000-$FFFF range is a single switchable 32 KB bank; there is
- * no fixed bank and the power-on bank register state is undefined.  The
- * last bank is loaded as the primary (non-overlay) block, since startup
- * code and the "real" interrupt vectors usually live there; all other
- * banks are loaded as overlay blocks at $8000.
+ * The whole $8000-$FFFF range is a single switchable 32 KB window; there
+ * is no fixed bank and the power-on bank register state is undefined, so
+ * no bank lives in the default address space.  Every bank — including the
+ * last one — is an equal overlay block based at $8000; the default space
+ * above $8000 stays unmapped (RAM and hardware registers only).  Interrupt
+ * vectors are resolved per bank by the analyzer.
  *
  * Bank selection is done by writing to $8000-$FFFF; single-screen
  * mirroring control does not affect the CPU address layout.
@@ -57,16 +58,9 @@ public class AxRomMapper implements Mapper {
 
         Address addr8000 = space.getAddress(0x8000);
 
-        // Primary block: last bank — startup code and vectors usually live here
-        int lastBank = numBanks - 1;
-        MemoryBlockUtils.createInitializedBlock(program, false,
-            String.format("PRG_BANK_%d", lastBank), addr8000,
-            provider.getInputStream(prgOffset + (long) lastBank * BANK_SIZE), BANK_SIZE,
-            "PRG-ROM last bank (switchable, default)", "NES Loader",
-            true, false, true, log, monitor);
-
-        // Remaining switchable banks as overlays at $8000
-        for (int i = 0; i < lastBank; i++) {
+        // All banks are equal switchable overlays at $8000 — AxROM has no
+        // fixed bank, so nothing is mapped into the default address space.
+        for (int i = 0; i < numBanks; i++) {
             if (monitor.isCancelled()) break;
             long offset    = prgOffset + (long) i * BANK_SIZE;
             String name    = String.format("PRG_BANK_%d", i);

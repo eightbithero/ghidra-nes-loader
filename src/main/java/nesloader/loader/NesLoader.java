@@ -29,6 +29,8 @@ import nesloader.mapper.Mapper;
 import nesloader.mapper.Mmc1Mapper;
 import nesloader.mapper.NromMapper;
 import nesloader.mapper.UxRomMapper;
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryBlock;
 import nesloader.util.NesMemoryMap;
 
 /**
@@ -147,14 +149,31 @@ public class NesLoader extends AbstractLibrarySupportLoader {
     private void labelVectors(Program program, MessageLog log) {
         AddressSpace space  = program.getAddressFactory().getDefaultAddressSpace();
         SymbolTable symbols = program.getSymbolTable();
+        Memory memory       = program.getMemory();
 
         Map<Long, String> vectors = new LinkedHashMap<>();
         vectors.put(NesMemoryMap.VEC_NMI,     "VEC_NMI");
         vectors.put(NesMemoryMap.VEC_RESET,   "VEC_RESET");
         vectors.put(NesMemoryMap.VEC_IRQ_BRK, "VEC_IRQ_BRK");
 
+        // Label the vector table in every space that actually maps it: the
+        // default space for fixed-bank layouts, and each overlay bank whose
+        // range covers it (all-switchable layouts like AxROM have no
+        // default-space memory at $FFFA at all).
         for (Map.Entry<Long, String> e : vectors.entrySet()) {
-            createLabel(symbols, space.getAddress(e.getKey()), e.getValue(), log);
+            Address addr = space.getAddress(e.getKey());
+            if (memory.getBlock(addr) != null) {
+                createLabel(symbols, addr, e.getValue(), log);
+            }
+        }
+        for (MemoryBlock block : memory.getBlocks()) {
+            if (!block.isOverlay()) continue;
+            if (block.getStart().getOffset() > NesMemoryMap.VEC_NMI
+                    || block.getEnd().getOffset() < NesMemoryMap.VEC_IRQ_BRK + 1) continue;
+            AddressSpace ovl = block.getStart().getAddressSpace();
+            for (Map.Entry<Long, String> e : vectors.entrySet()) {
+                createLabel(symbols, ovl.getAddress(e.getKey()), e.getValue(), log);
+            }
         }
     }
 
